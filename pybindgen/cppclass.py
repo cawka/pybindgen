@@ -2665,7 +2665,7 @@ from pybindgen.cppmethod import CppMethod, CppConstructor, CppNoConstructor, Cpp
 
 def common_shared_object_return(value, py_name, cpp_class, code_block,
                                 type_traits, caller_owns_return,
-                                reference_existing_object, type_is_pointer):
+                                reference_existing_object, type_is_pointer, caller_manages_return=True):
 
     if type_is_pointer:
         value_value = '(*%s)' % value
@@ -2704,7 +2704,7 @@ def common_shared_object_return(value, py_name, cpp_class, code_block,
         ## Assign the C++ value to the Python wrapper
         if caller_owns_return:
             if type_traits.target_is_const:
-                code_block.write_code("%s->obj = (%s *) (%s);" % (py_name, cpp_class.full_name, value_ptr))                
+                code_block.write_code("%s->obj = (%s *) (%s);" % (py_name, cpp_class.full_name, value_ptr))
             else:
                 code_block.write_code("%s->obj = %s;" % (py_name, value_ptr))
             code_block.write_code(
@@ -2719,27 +2719,43 @@ def common_shared_object_return(value, py_name, cpp_class, code_block,
                     code_block.write_code(
                         "%s->flags = PYBINDGEN_WRAPPER_FLAG_OBJECT_NOT_OWNED;" % (py_name,))
                 else:
-                    # The PyObject creates its own copy
-                    if not cpp_class.has_copy_constructor:
-                        raise CodeGenerationError("Class {0} cannot be copied".format(cpp_class.full_name))
-                    cpp_class.write_create_instance(code_block,
-                                                         "%s->obj" % py_name,
-                                                         value_value)
+                    if caller_manages_return:
+                        # The PyObject creates its own copy
+                        if not cpp_class.has_copy_constructor:
+                            raise CodeGenerationError("Class {0} cannot be copied".format(cpp_class.full_name))
+                        cpp_class.write_create_instance(code_block,
+                                                             "%s->obj" % py_name,
+                                                             value_value)
+                        code_block.write_code(
+                            "%s->flags = PYBINDGEN_WRAPPER_FLAG_NONE;" % (py_name,))
+                        cpp_class.write_post_instance_creation_code(code_block,
+                                                                    "%s->obj" % py_name,
+                                                                    value_value)
+                    else:
+                        if type_traits.target_is_const:
+                            code_block.write_code("%s->obj = (%s *) (%s);" % (py_name, cpp_class.full_name, value_ptr))
+                        else:
+                            code_block.write_code("%s->obj = %s;" % (py_name, value_ptr))
+                        code_block.write_code(
+                            "%s->flags = PYBINDGEN_WRAPPER_FLAG_OBJECT_NOT_OWNED;" % (py_name,))
+            else:
+                if caller_manages_return:
+                    ## The PyObject gets a new reference to the same obj
                     code_block.write_code(
                         "%s->flags = PYBINDGEN_WRAPPER_FLAG_NONE;" % (py_name,))
-                    cpp_class.write_post_instance_creation_code(code_block,
-                                                                "%s->obj" % py_name,
-                                                                value_value)
-            else:
-                ## The PyObject gets a new reference to the same obj
-                code_block.write_code(
-                    "%s->flags = PYBINDGEN_WRAPPER_FLAG_NONE;" % (py_name,))
-                cpp_class.memory_policy.write_incref(code_block, value_ptr)
-                if type_traits.target_is_const:
-                    code_block.write_code("%s->obj = (%s*) (%s);" %
-                                                  (py_name, cpp_class.full_name, value_ptr))
+                    cpp_class.memory_policy.write_incref(code_block, value_ptr)
+                    if type_traits.target_is_const:
+                        code_block.write_code("%s->obj = (%s*) (%s);" %
+                                                      (py_name, cpp_class.full_name, value_ptr))
+                    else:
+                        code_block.write_code("%s->obj = %s;" % (py_name, value_ptr))
                 else:
-                    code_block.write_code("%s->obj = %s;" % (py_name, value_ptr))
+                    if type_traits.target_is_const:
+                        code_block.write_code("%s->obj = (%s *) (%s);" % (py_name, cpp_class.full_name, value_ptr))
+                    else:
+                        code_block.write_code("%s->obj = %s;" % (py_name, value_ptr))
+                    code_block.write_code(
+                        "%s->flags = PYBINDGEN_WRAPPER_FLAG_OBJECT_NOT_OWNED;" % (py_name,))
 
     ## closes def write_create_new_wrapper():
 
@@ -3262,7 +3278,7 @@ class CppClassRefReturnValue(CppClassReturnValueBase):
     REQUIRES_ASSIGNMENT_CONSTRUCTOR = True
 
     def __init__(self, ctype, is_const=False, caller_owns_return=False, reference_existing_object=None,
-                 return_internal_reference=None):
+                 return_internal_reference=None, caller_manages_return=True):
         #override to fix the ctype parameter with namespace information
         if ctype == self.cpp_class.name:
             ctype = self.cpp_class.full_name
@@ -3275,6 +3291,7 @@ class CppClassRefReturnValue(CppClassReturnValueBase):
             self.reference_existing_object = True
 
         self.caller_owns_return = caller_owns_return
+        self.caller_manages_return = caller_manages_return
 
     def get_c_error_return(self): # only used in reverse wrappers
         """See ReturnValue.get_c_error_return"""
@@ -3288,11 +3305,12 @@ class CppClassRefReturnValue(CppClassReturnValueBase):
             self.cpp_class.pystruct+'*', 'py_'+self.cpp_class.name)
         self.py_name = py_name
 
-        if self.reference_existing_object or self.caller_owns_return:
+        if self.reference_existing_object or self.caller_owns_return or not self.caller_manages_return:
             common_shared_object_return(self.value, py_name, self.cpp_class, wrapper.after_call,
                                         self.type_traits, self.caller_owns_return,
                                         self.reference_existing_object,
-                                        type_is_pointer=False)
+                                        type_is_pointer=False,
+                                        caller_manages_return=self.caller_manages_return)
         else:
 
             self.cpp_class.write_allocate_pystruct(wrapper.after_call, py_name)
@@ -3636,7 +3654,6 @@ class CppClassPtrParameter(CppClassParameterBase):
             
 
 
-
 class CppClassPtrReturnValue(CppClassReturnValueBase):
     "Class* return handler"
     CTYPES = []
@@ -3645,7 +3662,7 @@ class CppClassPtrReturnValue(CppClassReturnValueBase):
 
     def __init__(self, ctype, caller_owns_return=None, custodian=None,
                  is_const=False, reference_existing_object=None,
-                 return_internal_reference=None):
+                 return_internal_reference=None, caller_manages_return=True):
         """
         :param ctype: C type, normally 'MyClass*'
         :param caller_owns_return: if true, ownership of the object pointer
@@ -3695,6 +3712,7 @@ class CppClassPtrReturnValue(CppClassReturnValueBase):
                 caller_owns_return = False
 
         self.caller_owns_return = caller_owns_return
+        self.caller_manages_return = caller_manages_return
         self.reference_existing_object = reference_existing_object
         self.return_internal_reference = return_internal_reference
         if self.return_internal_reference:
@@ -3732,7 +3750,8 @@ class CppClassPtrReturnValue(CppClassReturnValueBase):
         common_shared_object_return(value, py_name, self.cpp_class, wrapper.after_call,
                                     self.type_traits, self.caller_owns_return,
                                     self.reference_existing_object,
-                                    type_is_pointer=True)
+                                    type_is_pointer=True,
+                                    caller_manages_return=self.caller_manages_return)
 
         # return the value
         wrapper.build_params.add_parameter("N", [py_name], prepend=True)
